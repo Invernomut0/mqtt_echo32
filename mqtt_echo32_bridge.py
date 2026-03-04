@@ -67,7 +67,8 @@ def load_secrets() -> dict[str, str]:
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     k, _, v = line.partition("=")
-                    secrets[k.strip()] = v.strip()
+                    # rimuove virgolette singole e doppie attorno al valore
+                    secrets[k.strip()] = v.strip().strip('"\'')
                     loaded.append(k.strip())
             log.debug("secrets.env chiavi trovate: %s", loaded)
         except Exception as exc:

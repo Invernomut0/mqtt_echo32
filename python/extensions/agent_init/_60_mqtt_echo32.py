@@ -73,7 +73,7 @@ def _load_secrets() -> dict[str, str]:
                     line = line.strip()
                     if line and not line.startswith("#") and "=" in line:
                         k, _, v = line.partition("=")
-                        secrets[k.strip()] = v.strip()
+                        secrets[k.strip()] = v.strip().strip('"\'')
                         loaded_keys.append(k.strip())
             _log(f"[debug] secrets.env chiavi trovate: {loaded_keys}")
         except Exception as exc:
