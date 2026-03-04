@@ -1,0 +1,472 @@
+substitutions:
+  name: m5stack-atom-echo-fdebec
+  friendly_name: M5Stack Atom Echo
+  micro_wake_word_model: okay_nabu
+  # Entità TTS di HA da usare per la risposta di Agent0
+  # Esempi: tts.piper, tts.google_translate_say, tts.home_assistant_cloud
+  tts_engine: tts.piper
+  # Entity ID del media player ESPHome in HA (friendly_name lowercase + underscore)
+  ha_media_player: media_player.m5stack_atom_echo_echo_media_player
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LED COLOR SCHEME
+# ─────────────────────────────────────────────────────────────────────────────
+#  🟡 Warm amber 60%   : idle, in attesa wake word
+#  🔵 Blu pulse lento  : listening (dopo wake word)
+#  💜 Viola pulse velo : VAD processing (sta elaborando il parlato)
+#  🟢 Verde solid      : STT ok — parola capita (lampeggio breve)
+#  🩵 Ciano pulse lento: thinking — Agent0 sta elaborando
+#  🔵 Blu solid 100%   : TTS in riproduzione
+#  🔴 Rosso solid      : errore
+#  🟠 Arancio pulse    : disconnesso da HA
+# ─────────────────────────────────────────────────────────────────────────────
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  name_add_mac_suffix: false
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  fast_connect: true
+  on_connect:
+    - script.execute: start_wake_word
+  on_disconnect:
+    - light.turn_on:
+        id: led
+        red: 100%
+        green: 40%
+        blue: 0%
+        brightness: 60%
+        effect: "Slow Pulse"
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+
+# ── MQTT ──────────────────────────────────────────────────────────────────────
+mqtt:
+  broker: !secret mqtt_broker
+  port: 1883
+  username: !secret mqtt_user
+  password: !secret mqtt_pass
+  id: mqtt_client
+  discovery: false
+
+  birth_message:
+    topic: agent0/echo32/status
+    payload: "online"
+    qos: 0
+    retain: false
+  will_message:
+    topic: agent0/echo32/status
+    payload: "offline"
+    qos: 0
+    retain: false
+
+  # ── Ricezione risposta Agent0 ───────────────────────────────────────────────
+  on_message:
+    - topic: agent0/echo32/tts
+      then:
+        # LED: blu pieno = sta riproducendo
+        - light.turn_on:
+            id: led
+            red: 0%
+            green: 0%
+            blue: 100%
+            brightness: 100%
+            effect: none
+        # Ferma eventuale riproduzione in corso
+        - media_player.stop:
+            id: echo_media_player
+        # Chiedi ad HA di sintetizzare e riprodurre la risposta
+        - homeassistant.service:
+            service: tts.speak
+            data:
+              entity_id: ${tts_engine}
+              media_player_entity_id: ${ha_media_player}
+              message: !lambda 'return x.c_str();'
+        # Resetta stato — il wake word ripartirà in on_idle del media player
+        - lambda: 'id(waiting_agent0) = false;'
+
+# ── Hardware ──────────────────────────────────────────────────────────────────
+esp32:
+  board: m5stack-atom
+  framework:
+    type: esp-idf
+
+i2s_audio:
+  id: i2s_audio_bus
+  i2s_lrclk_pin: GPIO33
+  i2s_bclk_pin: GPIO19
+
+microphone:
+  - platform: i2s_audio
+    id: echo_microphone
+    i2s_din_pin: GPIO23
+    adc_type: external
+    pdm: true
+
+speaker:
+  - platform: i2s_audio
+    id: echo_speaker
+    i2s_dout_pin: GPIO22
+    bits_per_sample: 32bit
+    dac_type: external
+    channel: right
+    buffer_duration: 40ms
+
+# ── Media Player ──────────────────────────────────────────────────────────────
+media_player:
+  - platform: speaker
+    id: echo_media_player
+    name: Echo Media Player
+    announcement_pipeline:
+      speaker: echo_speaker
+      format: WAV
+    codec_support_enabled: false
+    buffer_size: 8000
+    files:
+      - id: timer_finished_wave_file
+        file: https://github.com/esphome/wake-word-voice-assistants/raw/main/sounds/timer_finished.wav
+    on_announcement:
+      - if:
+          condition:
+            microphone.is_capturing
+          then:
+            - if:
+                condition:
+                  lambda: 'return id(wake_word_engine_location).current_option() == "On device";'
+                then:
+                  - micro_wake_word.stop
+                else:
+                  - voice_assistant.stop
+            - script.execute: reset_led
+      - light.turn_on:
+          id: led
+          red: 0%
+          green: 0%
+          blue: 100%
+          brightness: 100%
+          effect: none
+    on_idle:
+      - script.execute: start_wake_word
+
+# ── Stato globale ─────────────────────────────────────────────────────────────
+globals:
+  - id: waiting_agent0
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+# ── Voice Assistant ───────────────────────────────────────────────────────────
+voice_assistant:
+  id: va
+  microphone: echo_microphone
+  media_player: echo_media_player
+  noise_suppression_level: 3
+  auto_gain: 31dBFS
+  volume_multiplier: 1.5
+
+  # 🔵 Blu pulse lento: in ascolto
+  on_listening:
+    - light.turn_on:
+        id: led
+        red: 0%
+        green: 0%
+        blue: 100%
+        brightness: 80%
+        effect: "Slow Pulse"
+
+  # 💜 Viola pulse veloce: sta elaborando il parlato
+  on_stt_vad_end:
+    - light.turn_on:
+        id: led
+        red: 60%
+        green: 0%
+        blue: 100%
+        brightness: 80%
+        effect: "Fast Pulse"
+
+  # 🟢 Verde → 🩵 Ciano: capito, Agent0 sta pensando
+  on_stt_end:
+    # Stoppa il pipeline HA: non vogliamo che risponda Gemini
+    - voice_assistant.stop
+    # Breve verde = "ho capito"
+    - light.turn_on:
+        id: led
+        red: 0%
+        green: 100%
+        blue: 0%
+        brightness: 100%
+        effect: none
+    - delay: 400ms
+    # Ciano pulse lento = Agent0 sta elaborando
+    - light.turn_on:
+        id: led
+        red: 0%
+        green: 80%
+        blue: 100%
+        brightness: 60%
+        effect: "Slow Pulse"
+    # Flag: non riavviare wake word finché Agent0 non risponde
+    - lambda: 'id(waiting_agent0) = true;'
+    # Pubblica il testo a Agent0
+    - mqtt.publish:
+        topic: agent0/echo32/stt
+        qos: 0
+        retain: false
+        payload: !lambda |-
+          return x;
+
+  # Ignorato se waiting_agent0 — altrimenti LED per TTS HA normale
+  on_tts_start:
+    - if:
+        condition:
+          lambda: 'return !id(waiting_agent0);'
+        then:
+          - light.turn_on:
+              id: led
+              red: 0%
+              green: 0%
+              blue: 100%
+              brightness: 100%
+              effect: none
+
+  on_end:
+    - delay: 100ms
+    # Riavvia wake word solo se NON stiamo aspettando Agent0
+    - if:
+        condition:
+          lambda: 'return !id(waiting_agent0);'
+        then:
+          - script.execute: start_wake_word
+
+  # 🔴 Rosso: errore
+  on_error:
+    - lambda: 'id(waiting_agent0) = false;'
+    - light.turn_on:
+        id: led
+        red: 100%
+        green: 0%
+        blue: 0%
+        brightness: 100%
+        effect: none
+    - delay: 2s
+    - script.execute: reset_led
+
+  on_client_connected:
+    - delay: 2s
+    - script.execute: start_wake_word
+
+  on_client_disconnected:
+    - voice_assistant.stop
+    - micro_wake_word.stop
+
+  on_timer_finished:
+    - voice_assistant.stop
+    - micro_wake_word.stop
+    - wait_until:
+        not: microphone.is_capturing
+    - switch.turn_on: timer_ringing
+    - light.turn_on:
+        id: led
+        red: 0%
+        green: 100%
+        blue: 0%
+        brightness: 100%
+        effect: "Fast Pulse"
+    - wait_until:
+        switch.is_off: timer_ringing
+    - light.turn_off: led
+    - switch.turn_off: timer_ringing
+
+# ── Button ────────────────────────────────────────────────────────────────────
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO39
+      inverted: true
+    name: Button
+    id: echo_button
+    entity_category: diagnostic
+    on_multi_click:
+      - timing:
+          - ON for at least 50ms
+          - OFF for at least 50ms
+        then:
+          - if:
+              condition:
+                switch.is_on: timer_ringing
+              then:
+                - switch.turn_off: timer_ringing
+              else:
+                - lambda: 'id(waiting_agent0) = false;'
+                - script.execute: start_wake_word
+      - timing:
+          - ON for at least 10s
+        then:
+          - button.press: factory_reset_btn
+
+button:
+  - platform: factory_reset
+    id: factory_reset_btn
+    name: Factory reset
+
+# ── LED ───────────────────────────────────────────────────────────────────────
+light:
+  - platform: esp32_rmt_led_strip
+    id: led
+    pin: GPIO27
+    chipset: SK6812
+    num_leds: 1
+    rgb_order: grb
+    default_transition_length: 0s
+    effects:
+      - pulse:
+          name: "Slow Pulse"
+          transition_length: 250ms
+          update_interval: 250ms
+          min_brightness: 30%
+          max_brightness: 100%
+      - pulse:
+          name: "Fast Pulse"
+          transition_length: 80ms
+          update_interval: 80ms
+          min_brightness: 50%
+          max_brightness: 100%
+
+# ── Scripts ───────────────────────────────────────────────────────────────────
+script:
+  # 🟡 Ripristino LED in stato idle (warm amber)
+  - id: reset_led
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return id(wake_word_engine_location).current_option() == "On device";
+          then:
+            - light.turn_on:
+                id: led
+                red: 100%
+                green: 89%
+                blue: 71%
+                brightness: 60%
+                effect: none
+          else:
+            - light.turn_on:
+                id: led
+                red: 0%
+                green: 100%
+                blue: 100%
+                brightness: 60%
+                effect: none
+
+  # Avvio wake word
+  - id: start_wake_word
+    then:
+      - lambda: 'id(waiting_agent0) = false;'
+      - wait_until:
+          and:
+            - media_player.is_idle
+            - speaker.is_stopped
+      - if:
+          condition:
+            lambda: |-
+              return id(wake_word_engine_location).current_option() == "On device";
+          then:
+            - voice_assistant.stop
+            - micro_wake_word.stop
+            - delay: 1s
+            - script.execute: reset_led
+            - micro_wake_word.start
+          else:
+            - voice_assistant.start_continuous
+
+# ── Switches ──────────────────────────────────────────────────────────────────
+switch:
+  - platform: template
+    name: Use listen light
+    id: use_listen_light
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+    on_turn_on:
+      script.execute: reset_led
+    on_turn_off:
+      script.execute: reset_led
+
+  - platform: template
+    id: timer_ringing
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    on_turn_off:
+      - lambda: |-
+          id(echo_media_player)
+            ->make_call()
+            .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_REPEAT_OFF)
+            .set_announcement(true)
+            .perform();
+          id(echo_media_player)->set_playlist_delay_ms(speaker::AudioPipelineType::ANNOUNCEMENT, 0);
+      - media_player.stop:
+          announcement: true
+    on_turn_on:
+      - lambda: |-
+          id(echo_media_player)
+            ->make_call()
+            .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_REPEAT_ONE)
+            .set_announcement(true)
+            .perform();
+          id(echo_media_player)->set_playlist_delay_ms(speaker::AudioPipelineType::ANNOUNCEMENT, 1000);
+      - media_player.speaker.play_on_device_media_file:
+          media_file: timer_finished_wave_file
+          announcement: true
+      - delay: 10min
+      - switch.turn_off: timer_ringing
+
+# ── Select ────────────────────────────────────────────────────────────────────
+select:
+  - platform: template
+    entity_category: config
+    name: Wake word engine location
+    id: wake_word_engine_location
+    optimistic: true
+    restore_value: true
+    options:
+      - "In Home Assistant"
+      - "On device"
+    initial_option: "On device"
+    on_value:
+      - if:
+          condition:
+            lambda: 'return x == "In Home Assistant";'
+          then:
+            - micro_wake_word.stop
+            - delay: 500ms
+            - lambda: 'id(va).set_use_wake_word(true);'
+            - voice_assistant.start_continuous
+      - if:
+          condition:
+            lambda: 'return x == "On device";'
+          then:
+            - lambda: 'id(va).set_use_wake_word(false);'
+            - voice_assistant.stop
+            - delay: 500ms
+            - micro_wake_word.start
+
+# ── Micro Wake Word ───────────────────────────────────────────────────────────
+micro_wake_word:
+  on_wake_word_detected:
+    - voice_assistant.start:
+        wake_word: !lambda |-
+          return wake_word;
+  vad:
+  models:
+    - model: ${micro_wake_word_model}
+      probability_cutoff: 0.98
