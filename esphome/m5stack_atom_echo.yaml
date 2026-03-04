@@ -86,12 +86,16 @@ mqtt:
         - media_player.stop:
             id: echo_media_player
         # Chiedi ad HA di sintetizzare e riprodurre la risposta
+        # NOTA: valori dinamici vanno in data_template+variables, non in data+lambda
         - homeassistant.service:
             service: tts.speak
             data:
               entity_id: ${tts_engine}
               media_player_entity_id: ${ha_media_player}
-              message: !lambda 'return x.c_str();'
+            data_template:
+              message: '{{ tts_text }}'
+            variables:
+              tts_text: !lambda 'return x;'
         # Resetta stato — il wake word ripartirà in on_idle del media player
         - lambda: 'id(waiting_agent0) = false;'
 
@@ -252,6 +256,8 @@ voice_assistant:
         retain: false
         payload: !lambda |-
           return x;
+    # Ferma subito la pipeline HA: non deve elaborare intent né fare TTS
+    - voice_assistant.stop
 
   # 🔵 Blu solid: HA sta riproducendo TTS (es. risposta Gemini)
   # Se waiting_agent0, abbiamo già fermato il speaker via on_stt_end
@@ -422,25 +428,30 @@ script:
   # Avvio wake word
   - id: start_wake_word
     then:
-      - lambda: |-
-          id(waiting_agent0) = false;
-          id(agent0_timeout_counter) = 0;
-      - wait_until:
-          and:
-            - media_player.is_idle
-            - speaker.is_stopped
+      # Guardia: non riavviare se stiamo ancora aspettando Agent0
       - if:
           condition:
-            lambda: |-
-              return id(wake_word_engine_location).current_option() == "On device";
+            lambda: 'return id(waiting_agent0);'
           then:
-            - voice_assistant.stop
-            - micro_wake_word.stop
-            - delay: 1s
-            - script.execute: reset_led
-            - micro_wake_word.start
+            - logger.log: "start_wake_word ignorato: waiting_agent0=true"
           else:
-            - voice_assistant.start_continuous
+            - lambda: 'id(agent0_timeout_counter) = 0;'
+            - wait_until:
+                and:
+                  - media_player.is_idle
+                  - speaker.is_stopped
+            - if:
+                condition:
+                  lambda: |-
+                    return id(wake_word_engine_location).current_option() == "On device";
+                then:
+                  - voice_assistant.stop
+                  - micro_wake_word.stop
+                  - delay: 1s
+                  - script.execute: reset_led
+                  - micro_wake_word.start
+                else:
+                  - voice_assistant.start_continuous
 
 interval:
   # Timeout: se Agent0 non risponde entro 15s, resetta
