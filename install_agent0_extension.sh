@@ -14,6 +14,18 @@ fail() { echo "$PREFIX ERROR: $*" >&2; exit 1; }
 
 log "Avvio installazione (A0_ROOT=$A0_ROOT)"
 
+# ── 0. auto-repair: ripristina il repo se ci sono modifiche locali ────────────
+if git -C "$SCRIPT_DIR" rev-parse --git-dir &>/dev/null; then
+    DIRTY_FILES="$(git -C "$SCRIPT_DIR" status --porcelain 2>/dev/null || true)"
+    if [ -n "$DIRTY_FILES" ]; then
+        warn "Rilevate modifiche locali nel repo — ripristino automatico a HEAD:"
+        echo "$DIRTY_FILES" | while read -r line; do warn "  $line"; done
+        git -C "$SCRIPT_DIR" reset --hard HEAD 2>/dev/null || true
+        git -C "$SCRIPT_DIR" clean -fd 2>/dev/null || true
+        log "Repo ripristinato a HEAD"
+    fi
+fi
+
 # ── 1. rileva interprete Python ──────────────────────────────────────────────
 PYTHON=""
 for candidate in /opt/venv-a0/bin/python3 python3 python; do
@@ -129,6 +141,11 @@ if [ -z "$MQTT_BROKER_VAL" ]; then
     warn "MQTT_BROKER non configurato — daemon NON avviato."
     warn "Imposta MQTT_BROKER in $SECRETS_FILE e riesegui l'installer."
     log "Installazione completata (daemon non avviato)"
+    # cleanup repo anche in uscita anticipata
+    if git -C "$SCRIPT_DIR" rev-parse --git-dir &>/dev/null; then
+        git -C "$SCRIPT_DIR" reset --hard HEAD 2>/dev/null || true
+        git -C "$SCRIPT_DIR" clean -fd 2>/dev/null || true
+    fi
     exit 0
 fi
 
@@ -150,3 +167,10 @@ echo ""
 echo "✅ mqtt-echo32 installato (startup-safe)"
 echo "   MQTT_BROKER: $MQTT_BROKER_VAL"
 echo "   Bridge daemon: PID=$DAEMON_PID  log=$LOG_FILE  pid=$PID_FILE"
+
+# ── 7. cleanup finale: ripristina il repo per garantire future git pull ───────
+if git -C "$SCRIPT_DIR" rev-parse --git-dir &>/dev/null; then
+    git -C "$SCRIPT_DIR" reset --hard HEAD 2>/dev/null || true
+    git -C "$SCRIPT_DIR" clean -fd 2>/dev/null || true
+    log "Repo locale ripristinato a HEAD (futura git pull ok)"
+fi
