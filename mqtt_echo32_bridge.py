@@ -9,7 +9,7 @@ Avviato direttamente dall'installer a ogni boot del container.
 Secrets (in /a0/usr/secrets.env o variabili d'ambiente):
   MQTT_BROKER, MQTT_PORT, MQTT_USER, MQTT_PASS
   A0_API_URL   (default: http://localhost:80)
-  A0_API_KEY   (opzionale, se Agent Zero richiede auth)
+  A0_API_KEY   (chiave API Agent Zero — header X-API-KEY)
 """
 
 from __future__ import annotations
@@ -94,72 +94,69 @@ def load_secrets() -> dict[str, str]:
 
 # ── Agent Zero HTTP API ───────────────────────────────────────────────────────
 
-def call_agent_zero(text: str, api_url: str, api_key: str) -> str:
+def call_agent_zero(
+    text: str,
+    api_url: str,
+    api_key: str,
+    context_id: str | None = None,
+) -> tuple[str, str | None]:
     """
-    Invia testo ad Agent Zero via HTTP e restituisce la risposta testuale.
-    Supporta sia /api/chat (Agent Zero nativo) sia /v1/chat/completions (OpenAI compat).
+    Invia testo ad Agent Zero via POST /api_message.
+    Restituisce (risposta_testuale, context_id) per mantenere il contesto.
+    L'API key va nell'header X-API-KEY (non Authorization: Bearer).
     """
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+    }
     if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+        headers["X-API-KEY"] = api_key
 
-    # Prova tutti i formati noti di Agent Zero
-    # Formato 1: Agent Zero nativo (testo come "text", context come "context_id")
-    # Formato 2: Agent Zero nativo alternativo (campo "message")
-    # Formato 3: OpenAI compat
-    endpoints = [
-        (f"{api_url}/api/chat", {"text": text, "context_id": "echo32"}),
-        (f"{api_url}/api/chat", {"message": text, "context_id": "echo32"}),
-        (f"{api_url}/v1/chat/completions", {
-            "model": "agent-zero",
-            "messages": [{"role": "user", "content": text}],
-        }),
-    ]
+    endpoint = f"{api_url}/api_message"
+    payload: dict = {
+        "message": text,
+        "lifetime_hours": 24,
+    }
+    if context_id:
+        payload["context_id"] = context_id
 
-    for endpoint, payload in endpoints:
-        log.info("POST %s payload=%r", endpoint, payload)
-        try:
-            resp = requests.post(
-                endpoint,
-                json=payload,
-                headers=headers,
-                timeout=90,
-            )
-            log.info("Risposta HTTP %s: status=%d body=%r", endpoint, resp.status_code, resp.text[:1000])
-            if resp.status_code == 200:
-                try:
-                    data = resp.json()
-                except Exception:
-                    # risposta non-JSON ma 200 OK → usala direttamente
-                    log.info("Risposta non-JSON 200 OK, uso testo grezzo")
-                    return resp.text.strip()
-                # Agent Zero nativo — campo "response"
-                if "response" in data:
-                    return str(data["response"]).strip()
-                # Agent Zero — potrebbe avere "message" o "content"
-                if "message" in data:
-                    return str(data["message"]).strip()
-                if "content" in data:
-                    return str(data["content"]).strip()
-                # OpenAI compat
-                if "choices" in data:
-                    return data["choices"][0]["message"]["content"].strip()
-                log.warning("Risposta inattesa da %s: %r", endpoint, data)
-                return str(data)
-            elif resp.status_code == 422:
-                log.warning("HTTP 422 (Unprocessable Entity) da %s — payload non accettato: %r",
-                            endpoint, resp.text[:500])
+    log.info("POST %s payload=%r", endpoint, payload)
+    try:
+        resp = requests.post(
+            endpoint,
+            json=payload,
+            headers=headers,
+            timeout=90,
+        )
+        log.info("Risposta HTTP %d body=%r", resp.status_code, resp.text[:1000])
+        if resp.status_code == 200:
+            try:
+                data = resp.json()
+            except Exception:
+                log.info("Risposta non-JSON 200 OK, uso testo grezzo")
+                return resp.text.strip(), None
+            response_text = ""
+            if "response" in data:
+                response_text = str(data["response"]).strip()
+            elif "message" in data:
+                response_text = str(data["message"]).strip()
+            elif "content" in data:
+                response_text = str(data["content"]).strip()
             else:
-                log.warning("HTTP %d da %s: %r", resp.status_code, endpoint, resp.text[:300])
-        except requests.exceptions.ConnectionError as exc:
-            log.error("Connessione RIFIUTATA a %s: %s — Agent Zero è in ascolto su %s?", endpoint, exc, api_url)
-            break  # se la connessione è rifiutata non ha senso riprovare altri endpoint
-        except requests.exceptions.Timeout:
-            log.error("Timeout (90s) su %s — Agent Zero troppo lento o bloccato", endpoint)
-        except Exception as exc:
-            log.error("Errore chiamata %s: %s", endpoint, exc)
+                log.warning("Risposta inattesa: %r", data)
+                response_text = str(data)
+            new_context_id = data.get("context_id") or None
+            log.info("response=%r context_id=%s", response_text[:100], new_context_id)
+            return response_text, new_context_id
+        else:
+            log.error("HTTP %d da %s: %r", resp.status_code, endpoint, resp.text[:500])
+    except requests.exceptions.ConnectionError as exc:
+        log.error("Connessione RIFIUTATA a %s: %s — Agent Zero è in ascolto su %s?", endpoint, exc, api_url)
+    except requests.exceptions.Timeout:
+        log.error("Timeout (90s) su %s — Agent Zero troppo lento o bloccato", endpoint)
+    except Exception as exc:
+        log.error("Errore chiamata %s: %s", endpoint, exc)
 
-    return ""
+    return "", None
 
 
 # ── Bridge ────────────────────────────────────────────────────────────────────
@@ -176,6 +173,7 @@ class Echo32Bridge:
         self._client: mqtt.Client | None = None
         self._connected = False
         self._processing_lock = threading.Lock()
+        self._context_id: str | None = None  # mantiene il contesto della conversazione
 
     def start(self) -> None:
         log.info("Avvio bridge MQTT → broker %s:%d", self.broker, self.port)
@@ -247,8 +245,13 @@ class Echo32Bridge:
 
     def _handle_stt(self, text: str) -> None:
         with self._processing_lock:
-            log.info("Elaborazione STT: %r", text)
-            response = call_agent_zero(text, self.api_url, self.api_key)
+            log.info("Elaborazione STT: %r (context_id=%s)", text, self._context_id)
+            response, new_context = call_agent_zero(
+                text, self.api_url, self.api_key, self._context_id
+            )
+            if new_context:
+                self._context_id = new_context
+                log.info("context_id aggiornato: %s", self._context_id)
             if response:
                 self._publish_tts(response)
                 log.info("TTS pubblicato: %r", response)
