@@ -1,0 +1,7 @@
+{
+  "name": "mqtt-echo32",
+  "version": "1.0.0",
+  "install_script": "install_agent0_extension.sh",
+  "install_args": ["/a0"],
+  "extension_paths": ["python/extensions"]
+}
