@@ -103,12 +103,13 @@ def call_agent_zero(text: str, api_url: str, api_key: str) -> str:
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
-    # Prova prima l'endpoint nativo di Agent Zero
+    # Prova tutti i formati noti di Agent Zero
+    # Formato 1: Agent Zero nativo (testo come "text", context come "context_id")
+    # Formato 2: Agent Zero nativo alternativo (campo "message")
+    # Formato 3: OpenAI compat
     endpoints = [
-        (f"{api_url}/api/chat", {
-            "message": text,
-            "context_id": "echo32",
-        }),
+        (f"{api_url}/api/chat", {"text": text, "context_id": "echo32"}),
+        (f"{api_url}/api/chat", {"message": text, "context_id": "echo32"}),
         (f"{api_url}/v1/chat/completions", {
             "model": "agent-zero",
             "messages": [{"role": "user", "content": text}],
@@ -116,28 +117,45 @@ def call_agent_zero(text: str, api_url: str, api_key: str) -> str:
     ]
 
     for endpoint, payload in endpoints:
-        log.debug("POST %s payload=%r", endpoint, payload)
+        log.info("POST %s payload=%r", endpoint, payload)
         try:
             resp = requests.post(
                 endpoint,
                 json=payload,
                 headers=headers,
-                timeout=60,
+                timeout=90,
             )
-            log.debug("Risposta HTTP %s: status=%d body=%r", endpoint, resp.status_code, resp.text[:500])
+            log.info("Risposta HTTP %s: status=%d body=%r", endpoint, resp.status_code, resp.text[:1000])
             if resp.status_code == 200:
-                data = resp.json()
-                # Agent Zero nativo
+                try:
+                    data = resp.json()
+                except Exception:
+                    # risposta non-JSON ma 200 OK → usala direttamente
+                    log.info("Risposta non-JSON 200 OK, uso testo grezzo")
+                    return resp.text.strip()
+                # Agent Zero nativo — campo "response"
                 if "response" in data:
                     return str(data["response"]).strip()
+                # Agent Zero — potrebbe avere "message" o "content"
+                if "message" in data:
+                    return str(data["message"]).strip()
+                if "content" in data:
+                    return str(data["content"]).strip()
                 # OpenAI compat
                 if "choices" in data:
                     return data["choices"][0]["message"]["content"].strip()
                 log.warning("Risposta inattesa da %s: %r", endpoint, data)
                 return str(data)
-            log.warning("HTTP %d da %s", resp.status_code, endpoint)
+            elif resp.status_code == 422:
+                log.warning("HTTP 422 (Unprocessable Entity) da %s — payload non accettato: %r",
+                            endpoint, resp.text[:500])
+            else:
+                log.warning("HTTP %d da %s: %r", resp.status_code, endpoint, resp.text[:300])
         except requests.exceptions.ConnectionError as exc:
-            log.warning("Connessione fallita a %s: %s", endpoint, exc)
+            log.error("Connessione RIFIUTATA a %s: %s — Agent Zero è in ascolto su %s?", endpoint, exc, api_url)
+            break  # se la connessione è rifiutata non ha senso riprovare altri endpoint
+        except requests.exceptions.Timeout:
+            log.error("Timeout (90s) su %s — Agent Zero troppo lento o bloccato", endpoint)
         except Exception as exc:
             log.error("Errore chiamata %s: %s", endpoint, exc)
 
