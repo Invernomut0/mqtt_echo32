@@ -164,6 +164,10 @@ globals:
     type: bool
     restore_value: false
     initial_value: 'false'
+  - id: agent0_timeout_counter
+    type: int
+    restore_value: false
+    initial_value: '0'
 
 # ── Voice Assistant ───────────────────────────────────────────────────────────
 voice_assistant:
@@ -176,6 +180,9 @@ voice_assistant:
 
   # 🔵 Blu pulse lento: in ascolto
   on_listening:
+    - mqtt.publish:
+        topic: agent0/echo32/debug
+        payload: "on_listening"
     - light.turn_on:
         id: led
         red: 0%
@@ -186,6 +193,9 @@ voice_assistant:
 
   # 💜 Viola pulse veloce: sta elaborando il parlato
   on_stt_vad_end:
+    - mqtt.publish:
+        topic: agent0/echo32/debug
+        payload: "on_stt_vad_end"
     - light.turn_on:
         id: led
         red: 60%
@@ -196,8 +206,9 @@ voice_assistant:
 
   # 🟢 Verde → 🩵 Ciano: capito, Agent0 sta pensando
   on_stt_end:
-    # Stoppa il pipeline HA: non vogliamo che risponda Gemini
-    - voice_assistant.stop
+    - mqtt.publish:
+        topic: agent0/echo32/debug
+        payload: !lambda 'return std::string("on_stt_end: ") + x;'
     # Breve verde = "ho capito"
     - light.turn_on:
         id: led
@@ -216,7 +227,9 @@ voice_assistant:
         brightness: 60%
         effect: "Slow Pulse"
     # Flag: non riavviare wake word finché Agent0 non risponde
-    - lambda: 'id(waiting_agent0) = true;'
+    - lambda: |-
+        id(waiting_agent0) = true;
+        id(agent0_timeout_counter) = 0;
     # Pubblica il testo a Agent0
     - mqtt.publish:
         topic: agent0/echo32/stt
@@ -225,12 +238,18 @@ voice_assistant:
         payload: !lambda |-
           return x;
 
-  # Ignorato se waiting_agent0 — altrimenti LED per TTS HA normale
+  # Ferma la riproduzione HA/Gemini se stiamo aspettando Agent0
   on_tts_start:
     - if:
         condition:
-          lambda: 'return !id(waiting_agent0);'
+          lambda: 'return id(waiting_agent0);'
         then:
+          - mqtt.publish:
+              topic: agent0/echo32/debug
+              payload: "on_tts_start: blocking gemini tts"
+          - media_player.stop:
+              id: echo_media_player
+        else:
           - light.turn_on:
               id: led
               red: 0%
@@ -240,6 +259,9 @@ voice_assistant:
               effect: none
 
   on_end:
+    - mqtt.publish:
+        topic: agent0/echo32/debug
+        payload: "on_end"
     - delay: 100ms
     # Riavvia wake word solo se NON stiamo aspettando Agent0
     - if:
@@ -250,6 +272,9 @@ voice_assistant:
 
   # 🔴 Rosso: errore
   on_error:
+    - mqtt.publish:
+        topic: agent0/echo32/debug
+        payload: !lambda 'return std::string("on_error: ") + code + " " + message;'
     - lambda: 'id(waiting_agent0) = false;'
     - light.turn_on:
         id: led
@@ -371,7 +396,9 @@ script:
   # Avvio wake word
   - id: start_wake_word
     then:
-      - lambda: 'id(waiting_agent0) = false;'
+      - lambda: |-
+          id(waiting_agent0) = false;
+          id(agent0_timeout_counter) = 0;
       - wait_until:
           and:
             - media_player.is_idle
@@ -388,6 +415,32 @@ script:
             - micro_wake_word.start
           else:
             - voice_assistant.start_continuous
+
+interval:
+  # Timeout: se Agent0 non risponde entro 15s, resetta
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            lambda: 'return id(waiting_agent0);'
+          then:
+            - lambda: 'id(agent0_timeout_counter)++;'
+            - if:
+                condition:
+                  lambda: 'return id(agent0_timeout_counter) >= 15;'
+                then:
+                  - mqtt.publish:
+                      topic: agent0/echo32/debug
+                      payload: "timeout: no response from agent0, resetting"
+                  - light.turn_on:
+                      id: led
+                      red: 100%
+                      green: 60%
+                      blue: 0%
+                      brightness: 100%
+                      effect: none
+                  - delay: 500ms
+                  - script.execute: start_wake_word
 
 # ── Switches ──────────────────────────────────────────────────────────────────
 switch:
