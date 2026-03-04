@@ -178,11 +178,11 @@ voice_assistant:
   auto_gain: 31dBFS
   volume_multiplier: 1.5
 
-  # 🔵 Blu pulse lento: in ascolto
-  on_listening:
+  # Scatta immediatamente all'avvio pipeline (prima che HA risponda)
+  on_start:
     - mqtt.publish:
         topic: agent0/echo32/debug
-        payload: "on_listening"
+        payload: "on_start"
     - light.turn_on:
         id: led
         red: 0%
@@ -190,6 +190,12 @@ voice_assistant:
         blue: 100%
         brightness: 80%
         effect: "Slow Pulse"
+
+  # 🔵 Blu pulse lento: HA conferma ascolto STT
+  on_listening:
+    - mqtt.publish:
+        topic: agent0/echo32/debug
+        payload: "on_listening"
 
   # 💜 Viola pulse veloce: sta elaborando il parlato
   on_stt_vad_end:
