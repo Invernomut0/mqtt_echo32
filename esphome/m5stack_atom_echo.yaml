@@ -155,6 +155,15 @@ media_player:
           blue: 100%
           brightness: 100%
           effect: none
+    on_play:
+      # Stiamo riproducendo la risposta Agent0 (TTS da MQTT)
+      - light.turn_on:
+          id: led
+          red: 0%
+          green: 0%
+          blue: 100%
+          brightness: 100%
+          effect: none
     on_idle:
       - script.execute: start_wake_word
 
@@ -173,7 +182,7 @@ globals:
 voice_assistant:
   id: va
   microphone: echo_microphone
-  media_player: echo_media_player
+  speaker: echo_speaker
   noise_suppression_level: 3
   auto_gain: 31dBFS
   volume_multiplier: 1.5
@@ -244,17 +253,18 @@ voice_assistant:
         payload: !lambda |-
           return x;
 
-  # Ferma la riproduzione HA/Gemini se stiamo aspettando Agent0
+  # 🔵 Blu solid: HA sta riproducendo TTS (es. risposta Gemini)
+  # Se waiting_agent0, abbiamo già fermato il speaker via on_stt_end
   on_tts_start:
+    - mqtt.publish:
+        topic: agent0/echo32/debug
+        payload: "on_tts_start"
     - if:
         condition:
           lambda: 'return id(waiting_agent0);'
         then:
-          - mqtt.publish:
-              topic: agent0/echo32/debug
-              payload: "on_tts_start: blocking gemini tts"
-          - media_player.stop:
-              id: echo_media_player
+          # Blocca il TTS di HA — risponderà Agent0
+          - voice_assistant.stop
         else:
           - light.turn_on:
               id: led
