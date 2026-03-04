@@ -228,7 +228,21 @@ voice_assistant:
     - mqtt.publish:
         topic: agent0/echo32/debug
         payload: !lambda 'return std::string("on_stt_end: ") + x;'
-    # Breve verde = "ho capito"
+    # ⚡ PRIORITÀ MASSIMA: ferma subito la pipeline HA prima che elabori l'intent.
+    # Il delay per il LED verde deve venire DOPO voice_assistant.stop, altrimenti
+    # HA ha già 400ms per processare l'intent e avviare TTS.
+    - lambda: |-
+        id(waiting_agent0) = true;
+        id(agent0_timeout_counter) = 0;
+    - voice_assistant.stop
+    # Pubblica il testo a Agent0
+    - mqtt.publish:
+        topic: agent0/echo32/stt
+        qos: 0
+        retain: false
+        payload: !lambda |-
+          return x;
+    # Breve verde = "ho capito" (DOPO lo stop, solo cosmetico)
     - light.turn_on:
         id: led
         red: 0%
@@ -245,19 +259,6 @@ voice_assistant:
         blue: 100%
         brightness: 60%
         effect: "Slow Pulse"
-    # Flag: non riavviare wake word finché Agent0 non risponde
-    - lambda: |-
-        id(waiting_agent0) = true;
-        id(agent0_timeout_counter) = 0;
-    # Pubblica il testo a Agent0
-    - mqtt.publish:
-        topic: agent0/echo32/stt
-        qos: 0
-        retain: false
-        payload: !lambda |-
-          return x;
-    # Ferma subito la pipeline HA: non deve elaborare intent né fare TTS
-    - voice_assistant.stop
 
   # 🔵 Blu solid: HA sta riproducendo TTS (es. risposta Gemini)
   # Se waiting_agent0, abbiamo già fermato il speaker via on_stt_end
