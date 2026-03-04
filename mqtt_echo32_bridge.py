@@ -81,6 +81,15 @@ def load_secrets() -> dict[str, str]:
             secrets[key] = os.environ[key]
             log.debug("%s da variabile d'ambiente", key)
 
+    # AGENT_ZERO_API_KEY è il nome usato da Agent Zero nei propri secrets —
+    # se A0_API_KEY non è impostata esplicitamente, usa quella
+    if not secrets.get("A0_API_KEY") and secrets.get("AGENT_ZERO_API_KEY"):
+        secrets["A0_API_KEY"] = secrets["AGENT_ZERO_API_KEY"]
+        log.debug("A0_API_KEY ricavata da AGENT_ZERO_API_KEY")
+    elif not secrets.get("A0_API_KEY") and os.environ.get("AGENT_ZERO_API_KEY"):
+        secrets["A0_API_KEY"] = os.environ["AGENT_ZERO_API_KEY"]
+        log.debug("A0_API_KEY ricavata da env AGENT_ZERO_API_KEY")
+
     log.debug(
         "Secrets risolti → BROKER=%s PORT=%s USER=%s PASS=%s A0_API_URL=%s",
         secrets.get("MQTT_BROKER", "—"),
