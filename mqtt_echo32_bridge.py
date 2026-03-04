@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import signal
 import sys
 import time
@@ -51,6 +52,44 @@ except ImportError:
 TOPIC_STT    = "agent0/echo32/stt"
 TOPIC_TTS    = "agent0/echo32/tts"
 TOPIC_STATUS = "agent0/echo32/status"
+
+
+# ── TTS text cleanup ──────────────────────────────────────────────────────────
+
+def strip_markdown(text: str) -> str:
+    """
+    Rimuove formattazione markdown e caratteri non parlabili dal testo TTS.
+    Converte il testo in una forma pulita adatta alla sintesi vocale.
+    """
+    # Rimuovi blocchi di codice (```...```)
+    text = re.sub(r"```[\s\S]*?```", "", text)
+    # Rimuovi inline code (`...`)
+    text = re.sub(r"`[^`]*`", "", text)
+    # Rimuovi grassetto/corsivo (**text**, *text*, __text__, _text_)
+    text = re.sub(r"\*{1,3}([^*]+)\*{1,3}", r"\1", text)
+    text = re.sub(r"_{1,2}([^_]+)_{1,2}", r"\1", text)
+    # Rimuovi header markdown (# ## ###)
+    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+    # Rimuovi link markdown [testo](url)
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    # Rimuovi bullet list markers (-, *, •)
+    text = re.sub(r"^\s*[-*•]\s+", "", text, flags=re.MULTILINE)
+    # Rimuovi emoji Unicode
+    text = re.sub(
+        r"[\U0001F300-\U0001FFFF"
+        r"\U00002600-\U000027BF"
+        r"\U0001F000-\U0001F9FF"
+        r"\u2600-\u27BF"
+        r"\u2700-\u27BF]+",
+        "",
+        text,
+        flags=re.UNICODE,
+    )
+    # Normalizza spazi multipli e newline
+    text = re.sub(r"\n{2,}", ". ", text)
+    text = re.sub(r"\n", " ", text)
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip()
 
 
 # ── secrets ──────────────────────────────────────────────────────────────────
@@ -262,8 +301,11 @@ class Echo32Bridge:
                 self._context_id = new_context
                 log.info("context_id aggiornato: %s", self._context_id)
             if response:
-                self._publish_tts(response)
-                log.info("TTS pubblicato: %r", response)
+                tts_text = strip_markdown(response)
+                log.info("TTS (grezzo): %r", response[:120])
+                log.info("TTS (pulito): %r", tts_text[:120])
+                self._publish_tts(tts_text)
+                log.info("TTS pubblicato: %r", tts_text)
             else:
                 log.warning("Nessuna risposta da Agent Zero per: %r", text)
 

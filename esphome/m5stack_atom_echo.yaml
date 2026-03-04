@@ -2,9 +2,15 @@ substitutions:
   name: m5stack-atom-echo-fdebec
   friendly_name: M5Stack Atom Echo
   micro_wake_word_model: okay_nabu
-  # Entità TTS di HA da usare per la risposta di Agent0
-  # Esempi: tts.piper, tts.google_translate_say, tts.home_assistant_cloud
-  tts_engine: tts.piper
+  # Entità TTS di HA da usare per la risposta di Agent0.
+  # Per trovare il valore corretto: HA → Impostazioni → Assistenti → TTS
+  # oppure cerca in Developer Tools → Stati le entità che iniziano con "tts."
+  # Esempi comuni:
+  #   tts.google_translate_say         (Google Translate legacy)
+  #   tts.google_translate_en_com      (Google Translate moderno)
+  #   tts.piper                        (Piper locale)
+  #   tts.home_assistant_cloud         (Nabu Casa cloud)
+  tts_engine: tts.google_translate_say
   # Entity ID del media player ESPHome in HA (friendly_name lowercase + underscore)
   ha_media_player: media_player.m5stack_atom_echo_echo_media_player
 
