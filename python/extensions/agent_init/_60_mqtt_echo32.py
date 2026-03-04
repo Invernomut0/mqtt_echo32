@@ -51,6 +51,10 @@ def _log(msg: str) -> None:
     print(f"[mqtt-echo32] {msg}", flush=True)
 
 
+# ── log caricamento modulo ───────────────────────────────────────────────────
+_log(f"Modulo caricato (paho={'ok' if _PAHO_AVAILABLE else 'MANCANTE'})")
+
+
 def _load_secrets() -> dict[str, str]:
     """
     Legge le credenziali da:
@@ -61,21 +65,35 @@ def _load_secrets() -> dict[str, str]:
 
     env_file = "/a0/usr/secrets.env"
     if os.path.exists(env_file):
+        _log(f"[debug] Lettura {env_file}")
         try:
+            loaded_keys: list[str] = []
             with open(env_file, encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if line and not line.startswith("#") and "=" in line:
                         k, _, v = line.partition("=")
                         secrets[k.strip()] = v.strip()
+                        loaded_keys.append(k.strip())
+            _log(f"[debug] secrets.env chiavi trovate: {loaded_keys}")
         except Exception as exc:
             _log(f"Errore lettura secrets.env: {exc}")
+    else:
+        _log(f"[debug] {env_file} non trovato")
 
     # le variabili d'ambiente sovrascrivono il file
     for key in ("MQTT_BROKER", "MQTT_PORT", "MQTT_USER", "MQTT_PASS"):
         if os.environ.get(key):
             secrets[key] = os.environ[key]
+            _log(f"[debug] {key} da variabile d'ambiente")
 
+    # riepilogo (password mascherata)
+    _log(
+        f"[debug] Secrets risolti → BROKER={secrets.get('MQTT_BROKER','—')} "
+        f"PORT={secrets.get('MQTT_PORT','—')} "
+        f"USER={secrets.get('MQTT_USER','—')} "
+        f"PASS={'***' if secrets.get('MQTT_PASS') else '—'}"
+    )
     return secrets
 
 
@@ -98,6 +116,7 @@ class Echo32MqttBridge:
             _log("paho-mqtt non installato — esegui: pip install paho-mqtt")
             return
 
+        _log("[debug] start() chiamato")
         secrets = _load_secrets()
         broker = secrets.get("MQTT_BROKER", "")
         if not broker:
@@ -108,20 +127,26 @@ class Echo32MqttBridge:
         username = secrets.get("MQTT_USER", "")
         password = secrets.get("MQTT_PASS", "")
 
+        _log(f"[debug] Connessione a {broker}:{port} user={username or '(nessuno)'}")
+
         # cattura il loop asyncio del thread principale (Agent Zero)
         try:
             self._loop = asyncio.get_event_loop()
+            _log(f"[debug] Loop asyncio: {self._loop}")
         except RuntimeError:
             self._loop = asyncio.new_event_loop()
+            _log("[debug] Creato nuovo loop asyncio")
 
         self._client = mqtt.Client(client_id="agent0-echo32-bridge", clean_session=True)
         if username:
             self._client.username_pw_set(username, password)
+            _log("[debug] Credenziali MQTT impostate")
 
         self._client.on_connect    = self._on_connect
         self._client.on_disconnect = self._on_disconnect
         self._client.on_message    = self._on_message
 
+        _log(f"[debug] Tentativo connect() a {broker}:{port}...")
         try:
             self._client.connect(broker, port, keepalive=60)
         except Exception as exc:
@@ -134,27 +159,36 @@ class Echo32MqttBridge:
             daemon=True,
         )
         self._thread.start()
-        _log(f"Bridge avviato → broker {broker}:{port}")
+        _log(f"Bridge avviato → broker {broker}:{port} (thread={self._thread.name})")
 
     # ── callbacks MQTT ───────────────────────────────────────────────────────
 
     def _on_connect(self, client, userdata, flags, rc) -> None:
+        _log(f"[debug] on_connect rc={rc} flags={flags}")
         if rc == 0:
             self._connected = True
-            client.subscribe(TOPIC_STT)
-            client.subscribe(TOPIC_STATUS)
-            _log(f"Connesso al broker. Iscritto a: {TOPIC_STT}, {TOPIC_STATUS}")
+            r1, _ = client.subscribe(TOPIC_STT)
+            r2, _ = client.subscribe(TOPIC_STATUS)
+            _log(f"Connesso al broker. Subscribe {TOPIC_STT} rc={r1}, {TOPIC_STATUS} rc={r2}")
         else:
-            _log(f"Errore connessione broker (rc={rc})")
+            rc_msgs = {
+                1: "protocollo non accettato", 2: "client ID rifiutato",
+                3: "server non disponibile", 4: "credenziali non valide",
+                5: "non autorizzato",
+            }
+            _log(f"Errore connessione broker rc={rc}: {rc_msgs.get(rc, 'sconosciuto')}")
 
     def _on_disconnect(self, client, userdata, rc) -> None:
         self._connected = False
+        _log(f"[debug] on_disconnect rc={rc} ({'inaspettato' if rc != 0 else 'normale'})")
         if rc != 0:
             _log(f"Disconnesso inaspettatamente (rc={rc}), riconnessione automatica...")
 
     def _on_message(self, client, userdata, msg) -> None:
         topic   = msg.topic
-        payload = msg.payload.decode("utf-8", errors="replace").strip()
+        raw     = msg.payload
+        payload = raw.decode("utf-8", errors="replace").strip()
+        _log(f"[debug] on_message topic={topic!r} qos={msg.qos} retain={msg.retain} len={len(raw)}B payload={payload!r}")
 
         if topic == TOPIC_STATUS:
             _log(f"ESP32 status: {payload}")
@@ -163,6 +197,8 @@ class Echo32MqttBridge:
         if topic == TOPIC_STT and payload:
             _log(f"STT ricevuto: {payload!r}")
             self._dispatch(payload)
+        elif topic == TOPIC_STT and not payload:
+            _log("[debug] STT ricevuto ma payload vuoto, ignorato")
 
     # ── dispatching verso Agent Zero ─────────────────────────────────────────
 
@@ -241,12 +277,17 @@ class MqttEcho32Extension(Extension):
     _lock    = threading.Lock()
 
     async def execute(self, **kwargs) -> Any:
+        agent_num = getattr(self.agent, "number", "?")
+        _log(f"[debug] execute() chiamato agent.number={agent_num} started={MqttEcho32Extension._started} kwargs={list(kwargs.keys())}")
+
         # solo agent 0, solo una volta
         if getattr(self.agent, "number", 0) != 0:
+            _log(f"[debug] Skipped: agent number={agent_num} != 0")
             return None
 
         with MqttEcho32Extension._lock:
             if MqttEcho32Extension._started:
+                _log("[debug] Già avviato, skip")
                 return None
             MqttEcho32Extension._started = True
 
@@ -254,11 +295,11 @@ class MqttEcho32Extension(Extension):
         _bridge = Echo32MqttBridge(agent=self.agent)
 
         # avvio in thread separato per non bloccare l'init
-        threading.Thread(
+        t = threading.Thread(
             target=_bridge.start,
             name="mqtt-echo32-init",
             daemon=True,
-        ).start()
-
-        _log("Estensione Echo32 MQTT inizializzata")
+        )
+        t.start()
+        _log(f"Estensione Echo32 MQTT inizializzata (thread={t.name} tid={t.ident})")
         return None
